@@ -1,0 +1,867 @@
+# -*- coding: utf-8 -*-
+
+'''
+Created on 2012-1-28
+Version 1.0
+@author: chenhx
+'''
+
+import re
+import time
+import datetime
+import requests
+import string
+import pandas as pd
+import MySQLdb
+import numpy as np
+#import talib
+from sqlalchemy import create_engine
+import smtplib  
+import email.MIMEMultipart
+import email.MIMEText  
+import email.MIMEBase  
+import email.MIMEImage 
+import mimetypes
+import os
+import urllib2
+import itertools
+#import matplotlib.pyplot as plt
+
+#改功能模块作用：
+#1、每天收盘从sina获取当日数据
+#2、每10分钟从sina获取实时数据，用各种funtion函数进行数据发掘
+#3、与典型上涨概率大的10日线进行相关性比对
+
+#改进：
+
+
+#dbIP = '127.0.0.1'
+#password = '123456'
+dbuser = 'root'
+dbport = 6600
+dbIP = '172.19.245.236'
+#dbIP = '101.132.100.41'
+dbpassword = 'stockup888'
+enableProxy = False
+page = 72 #东方财富主力流入页面数
+globalPDF2 = pd.DataFrame()
+globalPDF3 = pd.DataFrame()
+
+def fun_boll_3th(inputDF,n=20):
+    #计算布林通道的第三方函数,n=20为东方财富默认值
+    #
+    try:
+        df = inputDF.copy()                                     
+        #                                                       
+        df['tp'] = (df['Shigh'] + df['Slow'] + df['Sclose']) / 3
+        #                                                       
+        df['middle'] = pd.rolling_mean(df['tp'],n)              
+        df['sd'] = pd.rolling_std(df['tp'],n)                   
+        #                                                       
+        df['up'] = df['middle'] + 2*df['sd']                    
+        df['down'] = df['middle'] - 2*df['sd']                  
+        #                                     
+        #返回<type 'numpy.ndarray'>类型的三个boll值             
+        return np.array(df['up'].tolist()),np.array(df['middle'].tolist()),np.array(df['down'].tolist())
+    #如果失败则返回三个空元素
+    except:
+        return None,None,None
+
+
+def fun_searchDataFromWebEX(inputHTML):             #inputHTML用于从readFromWeb(url)获取的html代码
+    #本函数用于从网页中查找内容
+    resultList = []
+    searchStockKeywordCompile = re.compile('<table border="0" cellspacing="0" cellpadding="0" width="100%"><tr class="head"><td width="36">.*</table>')     #查找关键字:表单开始:
+    searchStockLinesCompile = re.compile('<tr><td>.*</td></tr>')     #查找关键字一行信息
+    searchStockItemsCompile = re.compile('<td>.*</td>')              #查找关键字一行中的逐个字段信息
+    #匹配出全部2个结果，10大流通和10大
+    tempKeywords = searchStockKeywordCompile.findall(inputHTML)
+    if tempKeywords:
+        for thekeyword in tempKeywords:
+            tempLines = searchStockLinesCompile.findall(thekeyword)
+            if tempLines:
+                #简单处理直接用[0]提取结果，不用for循环
+                tempItems = searchStockItemsCompile.findall(tempLines[0])
+                ItemsList = tempItems[0].replace('</td>','').replace('</tr><tr>','').split('<td>')
+                #第0个ItemsList是''，跳过，从1开始
+                conter = 1
+                while True:
+                    #每6个元素组成一个股票信息
+                    resultList.append(ItemsList[conter:conter+6])
+                    conter = conter + 6
+                    if (conter + 6) > len(ItemsList):
+                        break
+    #
+    return resultList #结构是[ [...],[...],[...]  ]
+
+
+def fun_readFromWeb(url):
+    #本函数用于从网络get网站内容
+    """
+    page = urllib.urlopen(url)
+    retrurnHTML = page.read()
+    return retrurnHTML                        #返回值是str类型
+    """
+    global enableProxy
+    proxyOffice = urllib2.ProxyHandler({'http': 'http://cmproxy.gmcc.net:8081'})
+    nullproxyOffice = urllib2.ProxyHandler({})
+    if enableProxy:
+      opener = urllib2.build_opener(proxyOffice, urllib2.HTTPHandler)
+    else:
+      opener = urllib2.build_opener(nullproxyOffice, urllib2.HTTPHandler)
+    #此句设置urllib2的全局opener
+    opener.addheaders = [('Accept','text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')]
+    opener.addheaders = [('Accept-Language','zh-CN,zh;q=0.8,en-US;q=0.5,en;q=0.3')]
+    opener.addheaders = [('User-Agent','Mozilla/5.0 (Windows NT 6.1; WOW64; rv:55.0) Gecko/20100101 Firefox/55.0')]
+    opener.addheaders = [('Accept-Encoding','deflate')]
+    doneGetURL = opener.open(url,timeout=10)    #设置超时时间10秒
+    return doneGetURL.read()
+
+
+def fun_getzhuli(Inputstock = '300117'):
+    #从东方财富获取主力是否在10大股东和10大流通股东中
+    retrunStr = ''
+    retrunCounter = 0.0
+    if Inputstock[:2] == '60':
+        stockNumberGT = 'sh' + Inputstock
+    else:
+        stockNumberGT = 'sz' + Inputstock
+    url = 'http://f9.eastmoney.com/%s.html'%stockNumberGT
+    #print url
+    htmlTypeNext = fun_readFromWeb(url) 
+    #print len(htmlTypeNext)
+    webpage = fun_searchDataFromWebEX(htmlTypeNext)
+    #print webpage
+    for theStockmessage in webpage:
+        #url返回的是原始编码（格式GBK），先用decode解码（GBK、cp936）。python文件是utf-8编码，所以重新编码encode为utf8
+        #print theStockmessage[1].decode('cp936'),theStockmessage[4]
+        if theStockmessage[1].decode('cp936').encode('utf8') == '中央汇金资产管理有限责任公司':
+            #retrunStr = retrunStr + 'HJ' + '>' + theStockmessage[4] + '-'
+            retrunCounter = retrunCounter + 1.0
+        if theStockmessage[1].decode('cp936').encode('utf8') == '中国国际金融股份有限公司':
+            #retrunStr = retrunStr + 'GJ' + '>' + theStockmessage[4] + '-'
+            retrunCounter = retrunCounter + 1.0
+        if theStockmessage[1].decode('cp936').encode('utf8') == '中国证券金融股份有限公司':
+            #retrunStr = retrunStr + 'ZJ' + '>' + theStockmessage[4] + '-'
+            retrunCounter = retrunCounter + 1.0
+        if theStockmessage[1][:8].decode('cp936').encode('utf8') == '全国社保':
+            #retrunStr = retrunStr + 'SB' + '>' + theStockmessage[4] + '-'
+            retrunCounter = retrunCounter + 0.6
+    if retrunCounter > 0:
+        retrunStr = 'GJD' + str(retrunCounter)
+    return retrunStr
+
+
+def fun_dfcf_readFromWeb(url):
+    #本函数用于从网络get网站内容
+    """
+    page = urllib.urlopen(url)
+    retrurnHTML = page.read()
+    return retrurnHTML                        #返回值是str类型
+    """
+    global enableProxy
+    proxyOffice = urllib2.ProxyHandler({'http': 'http://cmproxy.gmcc.net:8081'})
+    nullproxyOffice = urllib2.ProxyHandler({})
+    if enableProxy:
+      opener = urllib2.build_opener(proxyOffice, urllib2.HTTPHandler)
+    else:
+      opener = urllib2.build_opener(nullproxyOffice, urllib2.HTTPHandler)
+    #此句设置urllib2的全局opener
+    opener.addheaders = [('Accept','*/*')]
+    opener.addheaders = [('Referer','http://vol.stock.hexun.com/Stock/RankDetail.aspx?titType=7&stateType=down')]
+    opener.addheaders = [('Accept-Language','zh-CN')]
+    opener.addheaders = [('User-Agent','Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 6.1; WOW64; Trident/4.0; SLCC2; .NET CLR 2.0.50727; .NET CLR 3.5.30729; .NET CLR 3.0.30729; Media Center PC 6.0; InfoPath.2; .NET4.0C; .NET4.0E)')]
+    opener.addheaders = [('Accept-Encoding','deflate')]
+    doneGetURL = opener.open(url)
+    return doneGetURL.read()
+
+
+def fun_dfcf_searchDataFromNextWeb(inputHTML):             #inputHTML用于从readFromWeb(url)获取的html代码
+    #本函数用于从网络get任意一页，返回值是list类型的股票数据，，如1,300001,东方园林......
+    searchStockKeywordCompile = re.compile('var QZTpnLHo.*')
+    searchStockDataCompile = re.compile('\[.*\]')
+    returnList = []
+    tempKeyword = searchStockKeywordCompile.search(inputHTML)
+    if tempKeyword:
+        tempData = searchStockDataCompile.search(tempKeyword.group(0))
+        if tempData:
+            tempList = tempData.group(0).split('"')
+            for k in tempList:
+                if len(k) > 10:
+                    returnList.append(k)
+            return returnList
+        else:
+            pass
+    else:
+            pass
+    return returnList
+
+
+def fun_dfcf_insertIntoDB():
+    #本函数用于数据入库-东方财富
+    global dbIP
+    global dbuser
+    global dbpassword
+    global page
+    #
+    try:
+        DB = MySQLdb.connect(db='dfcf',host=dbIP,user=dbuser,passwd=dbpassword)
+        DB.set_character_set('utf8')
+    except:
+        print 'error-4:open db error'
+        return False                                        #打不开数据库退出程序
+        
+    try:
+        DBCursor=DB.cursor()
+    except:
+        DB.close()
+        print 'error-3:create cursor'
+        return False                                        #打不开数据库退出程序
+    #today =  time.strftime('%Y%m%d',time.localtime(time.time()))  #格式20150823
+    todayTime =  time.strftime('%Y-%m-%d',time.localtime(time.time()))  #格式2015-08-23
+    #    
+    counterSeq = 1    #用于记录数的记录
+    for tempPage in range(page):
+        try:
+            htmlTypeNext = fun_dfcf_readFromWeb('http://nufm.dfcfw.com/EM_Finance2014NumericApplication/JS.aspx/JS.aspx?type=ct&st=(BalFlowMain)&sr=-1&p=%s&ps=50&js=var%%20QZTpnLHo={pages:(pc),date:%%222014-10-22%%22,data:[(x)]}&token=894050c76af8597a853f5b408b759f5d&cmd=C._AB&sty=DCFFITA&rt=48520421'%str(tempPage))
+        except:
+            print 'error-5:fun_dfcf_readFromWeb'
+            continue
+        for tempData in fun_dfcf_searchDataFromNextWeb(htmlTypeNext):   #一页的返回数据，逐个股票信息读取
+        #上面两行readFromWeb/for tempData用于从网络读取数据，下面用于从文本文件读取数据
+        #htmlTypeNext = readFromFile()
+        #for tempData in searchDataFromFile(htmlTypeNext):
+            tempDataItem =  tempData.split(',')
+            if tempDataItem[4] == '-' :        #对当天停牌的个股进行处理，跳过
+                continue
+            if len(tempDataItem) == 16:        #每个有用的元素是16个字段
+                tmpStocknumber = tempDataItem[1]
+                try:
+                    #每个票创建一张记录表
+                    createtableSQL = "create table if not exists %s_zuli(st_seq int, st_number varchar(10), st_name varchar(20), st_price float, st_markup float,\
+                            st_inrush_zuli double, st_inrush_zuli_percent float,\
+                            st_inrush_chaoda double, st_inrush_chaoda_percent float,\
+                            st_inrush_da double, st_inrush_da_percent float,\
+                            st_inrush_zhong double, st_inrush_zhong_percent float,\
+                            st_inrush_xiao double, st_inrush_xiao_percent float, st_time date PRIMARY KEY)"%tmpStocknumber
+                    DBCursor.execute(createtableSQL)
+                    #数据拷贝到接口表
+                    insertSQL = "insert into %s_zuli(st_seq , st_number , st_name , st_price , st_markup ,\
+                            st_inrush_zuli , st_inrush_zuli_percent ,\
+                            st_inrush_chaoda , st_inrush_chaoda_percent ,\
+                            st_inrush_da , st_inrush_da_percent ,\
+                            st_inrush_zhong , st_inrush_zhong_percent ,\
+                            st_inrush_xiao , st_inrush_xiao_percent , st_time ) \
+                            values ('%f','%s','%s',%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,'%s')\
+                            "%(tmpStocknumber,counterSeq,tmpStocknumber,tempDataItem[2],string.atof(tempDataItem[3]),string.atof(tempDataItem[4]),string.atof(tempDataItem[5]),string.atof(tempDataItem[6]),string.atof(tempDataItem[7]),string.atof(tempDataItem[8]),string.atof(tempDataItem[9]),string.atof(tempDataItem[10]),string.atof(tempDataItem[11]),string.atof(tempDataItem[12]),string.atof(tempDataItem[13]),string.atof(tempDataItem[14]),todayTime)
+                    DBCursor.execute(insertSQL)
+                    #把数据从接口表拷贝到汇总表
+                    counterSeq =counterSeq + 1
+                except:
+                    print 'error-1:insert DB %s'%tmpStocknumber
+                    pass  #对当前记录录入错误的给予忽略，应为会有重复的股票代码被录入
+        DB.commit()    #每做完一页commit一次
+        print tempPage
+    #    
+    DB.commit()
+    DBCursor.close()
+    DB.close()
+    print 'insert dfcfDB done %s'%todayTime
+
+
+def open_insertDB_connect(inputDBname):
+    #该函数用于建立数据库的连接
+    dbtype = 'mysql'
+    global dbuser
+    global dbpassword
+    global dbIP
+    global dbport
+    dbname = inputDBname
+    charset = 'utf8'
+    global engine_connect2
+    engine_connect2 = create_engine('%s://%s:%s@%s:%s/%s?charset=%s'%(dbtype,dbuser,dbpassword,dbIP,dbport,dbname,charset))
+
+
+def sendMail(inputFilename):
+    currentTime =  time.strftime('%Y%m%d-%H-%M',time.localtime(time.time()))    #取当前时间的20150818-04-15
+    From = ""
+    To = ""
+    #附件名
+    #print inputFilename
+    file_name = inputFilename
+    
+    server = smtplib.SMTP("smtp.139.com")
+    #仅smtp服务器需要验证时
+    server.login("","")
+    
+    # 构造MIMEMultipart对象做为根容器
+    main_msg = email.MIMEMultipart.MIMEMultipart()
+    
+    # 构造MIMEText对象做为邮件显示内容并附加到根容器
+    text_msg = email.MIMEText.MIMEText("stock detail ",_charset="utf-8")
+    main_msg.attach(text_msg)
+    
+    # 构造MIMEBase对象做为文件附件内容并附加到根容器
+    ctype,encoding = mimetypes.guess_type(file_name)
+    if ctype is None or encoding is not None:
+        ctype='application/octet-stream'
+    maintype,subtype = ctype.split('/',1)
+    file_msg=email.MIMEImage.MIMEImage(open(file_name,'rb').read(),subtype)
+    #print ctype,encoding
+
+    ## 设置附件头
+    basename = os.path.basename(file_name)
+    file_msg.add_header('Content-Disposition','attachment', filename = basename)#修改邮件头
+    main_msg.attach(file_msg)
+      
+    # 设置根容器属性
+    main_msg['From'] = From
+    main_msg['To'] = To
+    main_msg['Subject'] = "stock detail %s"%currentTime
+    main_msg['Date'] = email.Utils.formatdate( )
+    
+    # 得到格式化后的完整文本
+    fullText = main_msg.as_string( )
+    # 用smtp发送邮件
+    try:
+        server.sendmail(From, To, fullText)
+    finally:
+        server.quit()
+    print 'send mail done'
+
+
+def read_mysql(inputSQL,inputDBname,index = 'index'):
+    #该函数用于pandas结构的数据入数据库
+    global dbuser
+    global dbpassword
+    global dbIP
+    global dbport
+    dbname = inputDBname
+    DBconnection = MySQLdb.connect(db=dbname,host=dbIP,port=dbport,user=dbuser,passwd=dbpassword)
+    #用'index'列作为索引
+    if index == 'noindex':
+        stockDF = pd.read_sql(inputSQL,DBconnection)#
+    else:
+        stockDF = pd.read_sql(inputSQL,DBconnection,index_col='index')#
+    #
+    return stockDF
+
+
+def insert_mysql(inputPandasFrame,inputTablename,inputDBname):
+    #该函数用于pandas结构的数据入数据库
+    dbtype = 'mysql'
+    global dbuser
+    global dbpassword
+    global dbIP
+    global dbport
+    dbname = inputDBname
+    charset = 'utf8'
+    global engine_connect2
+    #为避免过多数据库连接数 engine_connect2已经全局打开
+    pd.io.sql.to_sql(inputPandasFrame,inputTablename, engine_connect2, schema=dbname, if_exists='append')
+    #第一个参数thedataframe是需要导入的pd dataframe,
+    #第二个参数tablename是将导入的数据库中的表名
+    #第三个参数engine是启动数据库的接口，pd 1.9以后的版本，除了sqllite，均需要通过sqlalchemy来设置
+    #第四个参数databasename是将导入的数据库名字
+    #第五个参数if_exists='append'的意思是，如果表tablename存在，则将数据添加到这个表的后面
+
+
+def fun_getStocklist():
+    #从数据库中查询股票代码
+    try:
+        selectStockNumberSQL = "select distinct(st_number) from %s "%('stocknumber')
+        returnStocklist = read_mysql(selectStockNumberSQL,'sohu','noindex')
+        return returnStocklist
+    except:
+        return False
+
+
+def aly_funtion_2(inputPandsFrame):
+    #第2个分析函数：BOLL指标，寻找急速下跌的机会
+    #
+    stock_detail = inputPandsFrame
+    #
+    stock_close = stock_detail.Sclose
+    stock_high = stock_detail.Shigh
+    stock_low = stock_detail.Slow
+    #stock_open = stock_detail.Sopen
+    #转换成np.array格式，talib只支持这种格式
+    close = stock_close.values
+    high = stock_high.values
+    low = stock_low.values
+    #open = stock_open.values
+    #
+    try:
+        #rsi = talib.RSI(close, timeperiod=4)   #函数可用，与东方财富基本一致
+        #boll_upper,boll_middle,boll_lower=talib.BBANDS(close,20,2,2,0) #函数可用布林通道，与东方财富基本一致
+        boll_upper,boll_middle,boll_lower=fun_boll_3th(inputPandsFrame,20) #函数可用布林通道，与东方财富基本一致
+    #
+    #条件0:连续3天boll中线不递减,上轨递减
+        boll_mid1 = boll_middle[-1]
+        boll_mid2 = boll_middle[-2]
+        boll_mid3 = boll_middle[-3]
+        boll_up1 = boll_upper[-1]
+        boll_up2 = boll_upper[-2]
+        boll_up3 = boll_upper[-3]
+    except:
+        return -4
+    if boll_mid1 > boll_mid2 > boll_mid3:
+        pass
+    else:
+        return -3
+    #条件0:上轨递减
+    if boll_up3 > boll_up2 > boll_up1:
+        pass
+    else:
+        return -5
+    #条件1：连续3天boll高低差缩小（喇叭收口）
+    boll_up_low1 = boll_upper[-1] - boll_lower[-1]
+    boll_up_low2 = boll_upper[-2] - boll_lower[-2]
+    boll_up_low3 = boll_upper[-3] - boll_lower[-3]
+    if boll_up_low1 < boll_up_low2 < boll_up_low3:
+        pass
+    else:
+        return -2
+    #条件2：当前价格低于boll低值
+    if close[-1] < boll_lower[-1]:
+        return 1
+    #条件3：当日最低价低于boll低值，当前价格与低值价差小于0.5%(大于99.5)
+    if (low[-1] <= boll_lower[-1]) and (boll_lower[-1]/close[-1]*100 > 99.5):
+        #print 'low',low[-1],'close',close[-1],'bolllow',boll_lower[-1]
+        return 2
+    #
+    return -1
+
+
+def aly_funtion_3(inputPandsFrame):
+    #第2个分析函数：BOLL指标，寻找急速下跌的机会
+    #返回价差与low点的百分比
+    stock_detail = inputPandsFrame
+    #
+    stock_close = stock_detail.Sclose
+    #转换成np.array格式，talib只支持这种格式
+    close = stock_close.values
+    #
+    try:
+        #boll_upper,boll_middle,boll_lower=talib.BBANDS(close,20,2,2,0) #函数可用布林通道，与东方财富基本一致
+        boll_upper,boll_middle,boll_lower=fun_boll_3th(inputPandsFrame,20) #函数可用布林通道，与东方财富基本一致
+    except:
+        return -4.0
+    #
+    boll_low = boll_lower[-1]
+    close = close[-1]
+    #条件1：当日最低价低于boll低值，当前价格比低值小1.5%
+    lper = (boll_low-close)/boll_low*100
+    if (close < boll_low) and (lper >= 2.0):
+        return round(lper, 1)
+    #
+    return -1.0
+
+    
+def aly_funtion_corr(inputPandsFrame):
+    #分析函数，进行corr相似性判断
+    #list1是样板，list3是输入
+    retrunCorr = -1.0
+    try:
+        #提取某收盘数据
+        corrItem3 = inputPandsFrame.Sclose
+        #样板
+        list1 = [18.40, 18.16, 18.40, 18.45, 18.61, 18.94, 18.59, 18.52, 18.26, 17.80]
+        #转换成list，取后10个
+        list3 = corrItem3.tolist()
+        list3 = list3[-10:]
+        #重构pd.series
+        ser1 = pd.Series(list1)
+        ser3 = pd.Series(list3)
+        #相似性比较
+        retrunCorr = ser1.corr(ser3)
+        #
+        return round(retrunCorr,2)
+    except:
+        return retrunCorr
+
+
+def closingData2DB():
+    #本函数用于收盘后，从新浪网获取收盘数据
+    tap = 30                                                         #每次采集的股票数量
+    searchStockKeywordCompile = re.compile('".*"')                   #查找关键字"....."
+    searchStocknumberCompile = re.compile('str_........=')           #查找股票代码
+    #
+    stocksNumberInDB = []
+    #
+    today =  time.strftime('%Y%m%d',time.localtime(time.time()))            #格式20150823
+    todayTime =  time.strftime('%Y%m%d-%H-%M',time.localtime(time.time()))  #格式20150823-23-50
+    #
+    stockDF = fun_getStocklist()
+    stockNP = np.array(stockDF)
+    #构造全部股票代码的list
+    for tempStockNP in stockNP:
+        tempStock = tempStockNP[0]
+        stocksNumberInDB.append(tempStock)
+    #
+    defNumber = stocksNumberInDB    # 数据中的股票代码
+    defNumberlen = len(defNumber)
+    #
+    counter = 0
+    icounter = 0
+    while True:
+        head = counter*tap
+        end = (counter+1)*tap
+        optStock1 = defNumber[head:end]
+        if (counter+2)*tap >= defNumberlen:
+            optStock2 = defNumber[end:]
+            optStock1 = optStock1 + optStock2
+        url = 'http://hq.sinajs.cn/list='
+        #获取一组xx个代码的get语句
+        for i in optStock1:
+            tempnumber = i
+            if tempnumber[:2] == '60':
+                stockNumberGT = 'sh' + tempnumber + ','
+            else:
+                stockNumberGT = 'sz' + tempnumber + ','
+            url = url + stockNumberGT
+        #获取网页内容
+        webContent = requests.get(url)
+        #分割返回的一页中的30个代码
+        eachContent = webContent.text.split(';')
+        #逐个代码入库
+        for c in eachContent:
+            tempKeyword = searchStockKeywordCompile.search(c)
+            tempKeyStocknumber = searchStocknumberCompile.search(c)
+            if tempKeyStocknumber:
+                tempStocknumber = tempKeyStocknumber.group(0)[6:12]
+            if tempKeyword:
+                tempData = tempKeyword.group(0).replace('"','').split(',')   #用,分割数据
+                #返回数据不为空
+                if len(tempData) > 10:
+                    #清空list
+                    Dicdatetime = []
+                    Dicopenprice = []
+                    Dicmaxprice = []
+                    Dicminprice = []
+                    Diccloseprice = []
+                    Dicvolume = []
+                    #获取6个关键数据
+                    datetimeT = tempData[30].replace('-','')
+                    openprice = tempData[1]
+                    maxprice = tempData[4]
+                    minprice = tempData[5]
+                    closeprice = tempData[3]
+                    volume = tempData[9]    #成交金额
+                    #
+                    #如果停牌，openprice='0.000'
+                    fopenprice = float(openprice)
+                    if fopenprice == 0.0:
+                        continue
+                    else:
+                        pass
+                    #
+                    tStrptime=time.strptime(datetimeT,'%Y%m%d')
+                    tDate = datetime.date(*tStrptime[:3])
+                    Dicdatetime.append(tDate)
+                    Dicopenprice.append(fopenprice)
+                    Dicmaxprice.append(float(maxprice) )
+                    Dicminprice.append(float(minprice) )
+                    Diccloseprice.append(float(closeprice) )
+                    Dicvolume.append(float(volume)/10000 )#sina单位是元,sohu单位是万，需要转换
+                    #直接构造数据入库
+                    stockDF = pd.DataFrame({'Sdate':Dicdatetime,'Sopen':Dicopenprice,'Shigh':Dicmaxprice,'Slow':Dicminprice,'Sclose':Diccloseprice,'Svolume':Dicvolume,},index = Dicdatetime)
+                    try:
+                        insert_mysql(stockDF,tempStocknumber+'_day','sohu')
+                        print tempStocknumber,'done'
+                    except:
+                        continue
+        #
+        if (counter+2)*tap >= defNumberlen:
+            break
+        counter = counter + 1
+    #
+    print 'insert db done'
+    return True    
+    
+    
+def onlineSearching_funtion_2():    
+    #从新浪获取数据、实时数据进行测试
+    global globalPDF2
+    global globalPDF3
+    tap = 30                                                         #每次采集的股票数量
+    searchStockKeywordCompile = re.compile('".*"')                   #查找关键字"....."
+    searchStocknumberCompile = re.compile('str_........=')           #查找股票代码
+    #
+    stocksNumberInDB = []
+    #检测结果4个数列
+    stockmail = []
+    alytypemail = []
+    zhuliemail = []
+    corremail = []
+    #
+    stockmailF3 = []
+    alytypemailF3 = []
+    zhuliemailF3 = []
+    #corremailF3 = []
+    #
+    today =  time.strftime('%Y%m%d',time.localtime(time.time()))            #格式20150823
+    todayTime =  time.strftime('%Y%m%d-%H-%M',time.localtime(time.time()))  #格式20150823-23-50
+    #
+    stockDF = fun_getStocklist()
+    stockNP = np.array(stockDF)
+    #构造全部股票代码的list
+    for tempStockNP in stockNP:
+        tempStock = tempStockNP[0]
+        stocksNumberInDB.append(tempStock)
+    #
+    defNumber = stocksNumberInDB    # 数据中的股票代码
+    defNumberlen = len(defNumber)
+    #
+    counter = 0
+    icounter = 0
+    while True:
+        head = counter*tap
+        end = (counter+1)*tap
+        optStock1 = defNumber[head:end]
+        if (counter+2)*tap >= defNumberlen:
+            optStock2 = defNumber[end:]
+            optStock1 = optStock1 + optStock2
+        url = 'http://hq.sinajs.cn/list='
+        #获取一组xx个代码的get语句
+        for i in optStock1:
+            tempnumber = i
+            if tempnumber[:2] == '60':
+                stockNumberGT = 'sh' + tempnumber + ','
+            else:
+                stockNumberGT = 'sz' + tempnumber + ','
+            url = url + stockNumberGT
+        #获取网页内容
+        webContent = requests.get(url,timeout=20)
+        #分割返回的一页中的30个代码
+        eachContent = webContent.text.split(';')
+        #逐个代码入库
+        for c in eachContent:
+            tempKeyword = searchStockKeywordCompile.search(c)
+            tempKeyStocknumber = searchStocknumberCompile.search(c)
+            if tempKeyStocknumber:
+                tempStocknumber = tempKeyStocknumber.group(0)[6:12]
+            if tempKeyword:
+                tempData = tempKeyword.group(0).replace('"','').split(',')   #用,分割数据
+                #返回数据不为空
+                if len(tempData) > 10:
+                    #清空list
+                    Dicdatetime = []
+                    Dicopenprice = []
+                    Dicmaxprice = []
+                    Dicminprice = []
+                    Diccloseprice = []
+                    Dicvolume = []
+                    #获取6个关键数据
+                    datetimeT = tempData[30].replace('-','')
+                    openprice = tempData[1]
+                    maxprice = tempData[4]
+                    minprice = tempData[5]
+                    closeprice = tempData[3]
+                    volume = tempData[9]    #成交金额
+                    #如果停牌，openprice='0.000'，不进行处理
+                    fopenprice = float(openprice)
+                    if fopenprice == 0.0:
+                        continue
+                    else:
+                        pass
+                    #
+                    tStrptime=time.strptime(datetimeT,'%Y%m%d')
+                    tDate = datetime.date(*tStrptime[:3])
+                    Dicdatetime.append(tDate)
+                    Dicopenprice.append(fopenprice)
+                    Dicmaxprice.append(float(maxprice) )
+                    Dicminprice.append(float(minprice) )
+                    Diccloseprice.append(float(closeprice) )
+                    Dicvolume.append(float(volume)/10000 )   #sina单位是元,sohu单位是万，需要转换
+                    #直接构造dataframe数据，用于实时监听
+                    webDF = pd.DataFrame({'Sdate':Dicdatetime,'Sopen':Dicopenprice,'Shigh':Dicmaxprice,'Slow':Dicminprice,'Sclose':Diccloseprice,'Svolume':Dicvolume,},index = Dicdatetime)
+                    #从数据库取数据
+                    sql = "select * from %s_day"%(tempStocknumber)
+                    try:
+                        dbDF = read_mysql(sql,'sohu')
+                    except:
+                        continue
+                    #拼接为一个DataFrame,
+                    concatDF = pd.concat([webDF,dbDF],axis=0)    #axis=0 是行拼接，拼接之后行数增加
+                    #
+                    #funtion2检测,对dataframe进行重新排序（日期按日期递增）
+                    #第一种形态检测
+                    alyF2 = aly_funtion_2(concatDF.sort_index(axis=0,ascending=True))
+                    if alyF2 == 1:
+                        stockmail.append(tempStocknumber)   #1股票代码数列
+                        alytypemail.append(alyF2)           #2检测结果数列
+                        #
+                        try:
+                            tmpzhuli = fun_getzhuli(tempStocknumber) 
+                            if len(tmpzhuli) == 0:
+                                tmpzhuli = 'N'
+                        except:
+                            tmpzhuli = 'N'
+                        zhuliemail.append(tmpzhuli)         #3是否有国家队在10大股东
+                        #
+                        try:
+                            #对dataframe进行重新排序（日期按日期递增）
+                            tempcorr = aly_funtion_corr(concatDF.sort_index(axis=0,ascending=True))
+                            corremail.append(tempcorr)
+                        except:
+                            corremail.append(-100.0)         #4与上涨概率高的模型的10天日线相关系数
+                    #
+                    #第2种形态检测
+                    alyF3 = aly_funtion_3(concatDF.sort_index(axis=0,ascending=True))
+                    if alyF3 > 0:
+                        try:
+                            tmpzhuli = fun_getzhuli(tempStocknumber) 
+                            if len(tmpzhuli) == 0:
+                                tmpzhuli = 'N'
+                        except:
+                            tmpzhuli = 'N'
+                        if tmpzhuli != 'N':
+                            stockmailF3.append(tempStocknumber)   #1股票代码数列
+                            alytypemailF3.append(alyF3)           #2检测结果数列
+                            zhuliemailF3.append(tmpzhuli)         #3是否有国家队在10大股东
+                        else:
+                            pass
+                        #
+                    #以下可以添加各种形态检测
+                    #... ...
+        #
+            print tempStocknumber
+        if (counter+2)*tap >= defNumberlen:
+            break
+        counter = counter + 1
+    #检测结果数列写入文件，文件用于邮件发送
+    writeFileFlag = False
+    thisTime =  time.strftime('%H:%M',time.localtime(time.time()))               #取当前时间小时分钟
+    #F2检测结果
+    if len(stockmail) > 0:
+        tempContent = []
+        #构造表格中间的内容
+        for type,zhuli,corr in itertools.izip(alytypemail,zhuliemail,corremail ):
+            tempContent.append(str(type) + ' ; ' + str(zhuli) + ' ; ' + str(corr))
+        content = [tempContent]
+        #构造PD，横坐标是时间、纵坐标是代码，如下：
+        #          000001      000002      000003      000004
+        #22:19  1,主力1,0.11  2,主力2,0.22    NaN         NaN
+        #22:19        NaN         NaN     1,主力3,0.33  2,主力4,0.44
+        thisPD = pd.DataFrame(content,index=[thisTime],columns=stockmail)
+        #PD合并
+        globalPDF2 = pd.concat([globalPDF2,thisPD],axis=0)
+        writeFileFlag = True
+    #F3检测结果
+    if len(stockmailF3) > 0:
+        tempContent = []
+        #构造表格中间的内容
+        for type,zhuli in itertools.izip(alytypemailF3,zhuliemailF3 ):
+            tempContent.append(str(type) + ' ; ' + str(zhuli))
+        content = [tempContent]
+        thisPD = pd.DataFrame(content,index=[thisTime],columns=stockmailF3)
+        #PD合并
+        globalPDF3 = pd.concat([globalPDF3,thisPD],axis=0)
+        writeFileFlag = True
+    #
+    if writeFileFlag:
+        try:
+            currentTime =  time.strftime('%Y%m%d-%H-%M',time.localtime(time.time()))    #取当前时间的20150818-04-15
+            with pd.ExcelWriter('%s_pdpower.xls'%currentTime) as writer:
+                globalPDF2.to_excel(writer,sheet_name = 'F2',index=True)
+                globalPDF3.to_excel(writer,sheet_name = 'F3',index=True)
+            #sendMail('%s_pdpower.xls'%currentTime)
+        except:
+            pass
+    #
+    return True
+
+
+def closeSearching_funtion_2():    
+    #用于在收盘后从数据库读取数据进行检测
+    stockDF = fun_getStocklist()
+    stockNP = np.array(stockDF)
+    #
+    #构造全部股票代码的list
+    stocksNumberInDB = []
+    for tempStockNP in stockNP:
+        tempStock = tempStockNP[0]
+        stocksNumberInDB.append(tempStock)
+    #
+    #从数据库取数据
+    for tempStocknumber in stocksNumberInDB:
+        #从数据库取数据
+        sql = "select * from %s_day"%(tempStocknumber)
+        try:
+            dbDF = read_mysql(sql,'sohu')
+        except:
+            continue
+        #funtion2检测,对dataframe进行重新排序（日期按日期递增）
+        aly = aly_funtion_2(dbDF.sort_index(axis=0,ascending=True))
+        #
+        if aly == 1:
+            #相似性检测
+            tempcorr = aly_funtion_corr(dbDF.sort_index(axis=0,ascending=True))
+            print tempStocknumber,aly,tempcorr
+        else:
+            pass
+            #print 'run a way',tempStocknumber,aly
+
+
+def main():
+    #主执行函数
+    global globalPDF2
+    global globalPDF3
+    print 'run............'
+    runTime4InsertDBCompare = ['1516']
+    runTime4InsertDFCF = ['1540']
+    runTime4Modle7 = ['1000','1010','1020','1030','1040','1050','1100','1110','1120','1131','1310','1320','1330','1340','1350','1400','1410','1420','1430','1440','1450']
+    #
+    while True:
+        currentTime =  time.strftime('%H%M',time.localtime(time.time()))    #取当前时间的小时+分钟
+        weekDay = int(time.strftime("%w"))                                  #判断当日是周几，周六 6 周日 0 
+        if weekDay == 0 or weekDay == 6 :
+            time.sleep(3600)                                                #休眠1小时后继续循环
+            continue
+        #清空globalPDF2两次
+        if currentTime == '0930':
+            globalPDF2 = pd.DataFrame()
+            globalPDF3 = pd.DataFrame()
+        if currentTime == '0931':
+            globalPDF2 = pd.DataFrame()
+            globalPDF3 = pd.DataFrame()
+        #全日交易结束收盘后补录缺失的数据
+        for temprunTime in runTime4InsertDBCompare:
+            if temprunTime == currentTime:
+                try:
+                    closingData2DB()
+                    time.sleep(60)
+                except:
+                    pass
+            else:
+                pass
+        #全日交易结束收盘后录入东方财富主力流入数据
+        for temprunTime in runTime4InsertDFCF:
+            if temprunTime == currentTime:
+                try:
+                    fun_dfcf_insertIntoDB()
+                    time.sleep(60)
+                except:
+                    pass
+            else:
+                pass
+        #模型执行
+        for temprunTime in runTime4Modle7:
+            if temprunTime == currentTime:
+                try:
+                    onlineSearching_funtion_2()
+                    pass
+                except:
+                    print 'f2 error'
+                    pass
+            else:
+                pass
+        #
+        time.sleep(40)                        #每30秒核对一次时间,10
+#
+#先产生一个全局的数据库连接，避免连接数过多
+open_insertDB_connect('sohu')
+main()
+#onlineSearching_funtion_2()
+#closeSearching_funtion_2()
